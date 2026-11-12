@@ -1,94 +1,72 @@
 # 炉石一键拔线 · Hearthstone Disconnect
 
-macOS 菜单栏与游戏浮窗助手，通过 BepInEx 插件调用炉石客户端的 `Network.SimulateUncleanDisconnectFromGameServer()`。左键菜单栏图标或点击浮窗发送请求，右键查看状态、切换浮窗或退出。
+macOS 菜单栏与游戏浮窗助手，通过 BepInEx 插件调用炉石客户端的 `Network.SimulateUncleanDisconnectFromGameServer()`。浮窗显示「一键拔线」和插件状态；支持简体中文、繁體中文、English 与跟随系统。
+
+## 重要：从助手启动游戏
+
+**v1.7 起不再替换官方游戏启动入口。** 本机发现入口在再次启动时被恢复为官方程序，导致此前的启动器方案失效。普通 Battle.net 启动不会自动加载此插件。
+
+1. 完成当前对局，退出炉石，保持 Battle.net 已登录。
+2. 右键「拔线」菜单栏图标 → **通过助手启动炉石**。
+3. 等待“已就绪 · 点击拔线”，再点击浮窗发送指令。
+
+助手读取并验证官方程序签名，准备单独的 `Hearthstone.real` 本地签名副本，然后通过自带启动器设置干净的 Doorstop 环境运行副本。官方 `Hearthstone` 文件不会被替换。游戏运行期间禁止准备副本或启动第二个游戏。
+
+当前默认产品参数为国服 `hs_beta`。国际服可设置：
+
+```sh
+defaults write local.hearthstone.disconnect-only gameUID -string wtcg
+```
 
 ## 环境与构建
 
-需要 macOS 12+、Xcode Command Line Tools、.NET 8 SDK、合法安装的炉石客户端，以及已配置的 BepInEx 5 / Doorstop。默认安装目录为 `/Applications/Hearthstone`。仓库不分发游戏文件、游戏程序集或第三方运行库。
+需要 macOS 12+、Xcode Command Line Tools、.NET 8 SDK、合法安装的炉石客户端，以及已配置的兼容 BepInEx 5 / Doorstop。默认目录 `/Applications/Hearthstone`，本项目不包含游戏文件或第三方运行库。
 
 ```sh
 ./build.sh
+./Tests/run.sh
 ```
 
-产物为 `build/拔线.app` 和 `bin/Release/netstandard2.0/DisconnectOnly.dll`。应用使用本地 ad-hoc 签名，默认构建当前机器架构。
+产物：`build/拔线.app`（当前架构、本地 ad-hoc 签名）和 `bin/Release/netstandard2.0/DisconnectOnly.dll`。
 
-## 安装
+安装时退出旧助手，将 app 复制到 `/Applications/拔线.app`，将 DLL 放入游戏目录 `BepInEx/plugins/`。助手与插件必须一起更新，已经运行的游戏不会热加载新 DLL。
 
-先退出游戏并备份游戏目录。本项目面向已配置兼容 BepInEx / Doorstop 的环境，并非完整的一键安装包。需要以下依赖：
+需要的依赖：
 
 ```text
 /Applications/Hearthstone/
   libdoorstop.dylib
   BepInEx/core/BepInEx.Preloader.dll
-  BepInEx/unstripped_corlib/
+  BepInEx/unstripped_corlib/mscorlib.dll
   BepInEx/plugins/DisconnectOnly.dll
 ```
 
-1. 将构建出的 DLL 复制到上面的 plugins 目录。
-2. 将 `build/拔线.app` 复制到 `/Applications/拔线.app`。
-3. 启动助手，等待几秒完成入口检测，再通过 Battle.net 启动游戏：
+启动常驻助手：
 
 ```sh
 open -a /Applications/拔线.app --args --resident
 ```
 
-4. 右键菜单栏确认“拔线：就绪”，再点击浮窗或左键图标发送指令。
+普通启动或重新打开已运行的助手会尝试发送一次断线请求。开发界面预览增加 `--preview`。可选登录启动模板为 `local.hearthstone.disconnect-only.plist`。
 
-普通启动应用会尝试立即发送一次请求；`--resident` 只启动常驻助手。`local.hearthstone.disconnect-only.plist` 是可选登录启动模板，供放入 `~/Library/LaunchAgents/` 后使用 launchctl 管理。
+## 状态、协议和日志
 
-## 实现与排查
+- 游戏启动初期显示等待组件；没有心跳时明确提示下次从助手启动。
+- 只有最近 5 秒内、当前游戏 PID、协议版本 2 的心跳才允许发送请求。
+- 请求包含 UUID、目标 PID 和 4 秒有效期。过期、跨进程和旧协议请求不会执行。
+- 心跳与响应原子写入；处理中阻止重复操作，超时和退出时清理自身请求。
+- “指令已发送”表示客户端方法返回，并非服务器确认断线或重连。
 
-C# 插件在 Unity 主线程轮询请求，每秒写心跳。Swift 助手校验游戏 PID 和最近 5 秒心跳，以 UUID 匹配响应，4 秒超时。通信目录为 `~/Library/Application Support/Hearthstone Disconnect/`。
+右键“打开日志”进入 `~/Library/Application Support/Hearthstone Disconnect/`，其中 `launcher.log` 记录启动错误和退出状态；目录也包含心跳和通信文件。插件日志仍在游戏目录 `BepInEx/LogOutput.log`。
 
-C 启动器通过 Doorstop 加载 BepInEx，并执行 `Hearthstone.real`。助手检测游戏更新覆盖入口后，等待文件稳定并验证 Blizzard 签名，备份原文件、为运行副本本地签名，再恢复启动器。**运行助手会修改游戏启动文件。**
+本机此前使用 BepInEx 5.4.23.3、Unity 6000.3.11f1、客户端 37.0.255790。更新可能改变兼容性。构建仍有一个 System.Net.Http 依赖版本冲突警告。
 
-- “等待炉石启动”：入口已准备好，游戏未运行。
-- “本次未加载，下次启动生效”：结束对局后退出并重启游戏。
-- “启动入口待修复”：检查游戏目录权限和官方可执行文件签名。
-- “就绪”：当前游戏 PID 有新鲜插件心跳。
-- “已发送模拟断线指令”：客户端调用已返回，不代表服务器已确认断线或重连完成。
+## 验证边界
 
-日志位于游戏目录 `BepInEx/LogOutput.log`。游戏更新可能改变 API 或加载兼容性。
+v1.7 已通过 55 项 Swift/C# 断言和 C 启动器回归测试，实际游戏文件的临时副本也通过签名准备检查。**新入口的真实登录、插件加载和对局断线重连尚未验证**；用户对局期间未退出或重启游戏。此前的 [v1.6 检查记录](docs/stability-review-2026-11-12.md) 描述旧入口方案，已由 v1.7 替代。
 
-卸载：退出助手和游戏，卸载可选 LaunchAgent，通过 Battle.net 扫描修复恢复官方入口，再按需删除插件和助手。
-
-## 验证记录
-
-2026-11-12，本机客户端 37.0.255790：Swift、C 检查通过；C# 和完整应用构建通过（一个 `System.Net.Http` 依赖版本警告）。此前游戏更新覆盖启动入口，运行现有助手后入口已恢复。历史日志使用 BepInEx 5.4.23.3、Unity 6000.3.11f1，曾记录插件成功加载。本次直接启动游戏也记录了 `Disconnect Only ready` 并产生新心跳；随后游戏在启动阶段报告 Service Locator failure 并退出，尚未确定原因。插件加载已验证，实际进对局及断线/重连效果尚未验证。
+卸载时退出助手，删除可选 LaunchAgent、插件、助手和副本。如曾使用旧版替换入口，通过 Battle.net 扫描修复恢复官方程序。
 
 ## 许可证
 
-自有源码使用 MIT 许可证；第三方和游戏文件受各自许可约束，不随仓库分发。项目与 Blizzard 无隶属关系。
-
-## v1.5 界面与语言
-
-- 横向深色圆角浮窗，图标旁显示「一键拔线」，底部显示当前状态与操作反馈。
-- 右键菜单栏 →「语言」：跟随系统 / 简体中文 / 繁體中文 / English，立即切换并保存。
-- 处理中禁用重复操作；超时后清理本次请求，允许重试。旧的残留请求在十秒后可清理。
-- 右键菜单新增「打开日志」。拖动浮窗顶部可调整位置。
-- 开发预览：`open -a /Applications/拔线.app --args --resident --preview`，无需游戏即可查看浮窗；正常使用省略 `--preview`。
-
-### v1.5.1 启动修复
-
-清理从 Battle.net 继承的 Doorstop 运行时标记，避免重新启动游戏后仍跳过插件初始化。该修复在下次游戏启动生效，不会向当前游戏注入插件。
-
-启动器回归检查（不启动游戏）：
-
-```sh
-clang -Wall -Wextra -Werror Tests/DisconnectLauncherTests.c -o /tmp/disconnect-launcher-tests
-/tmp/disconnect-launcher-tests
-```
-
-## v1.6.0 稳定性修正与测试
-
-助手与插件必须一起更新。协议 2 的心跳包含版本号，请求包含 UUID、目标游戏 PID 和 4 秒有效期；旧插件不会被新助手误判为兼容。当前游戏已加载的插件不会热更新，下次游戏启动才加载新 DLL。
-
-- 初次观察到游戏后的 30 秒显示等待组件，之后显示未收到心跳，不再一律提示重启。
-- 游戏运行中停止自动修改游戏启动文件。
-- 心跳和响应原子写入，避免读取到半截内容。
-- 请求过期或目标进程不匹配时不调用断线 API；退出助手时清理本次未消费请求。
-- 打开菜单期间仍处理状态与响应计时；签名检查输出不会阻塞在未读取的管道中。
-
-回归测试：`./Tests/run.sh`。C# 测试运行实际插件源码，替换游戏 API 为测试桩；不会启动游戏或触发实际断线。
-
-完整检查记录见 [稳定性检查](docs/stability-review-2026-11-12.md)。
+自有源码采用 MIT；游戏和第三方组件遵循各自许可，不随仓库分发。与 Blizzard 无隶属关系。

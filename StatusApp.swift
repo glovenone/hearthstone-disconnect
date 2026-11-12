@@ -3,6 +3,14 @@ import Darwin
 import Foundation
 
 private let english: [String: String] = [
+    "通过助手启动炉石": "Launch Hearthstone with plugin",
+    "炉石正在运行，请先结束对局并退出游戏。": "Hearthstone is running. Finish your game and quit first.",
+    "请先打开并登录 Battle.net，再通过助手启动炉石。": "Sign in to Battle.net, then launch Hearthstone from this helper.",
+    "已启动炉石，正在等待插件心跳。": "Hearthstone launched. Waiting for plugin heartbeat.",
+    "启动失败：请检查游戏文件、依赖与签名，查看助手日志。": "Launch failed. Check files, dependencies and signatures. See helper logs.",
+    "插件未加载；结束对局并退出游戏后，请从助手菜单启动炉石。": "Plugin not loaded. Finish your game, quit, then launch from the helper.",
+    "依赖不完整 · 查看日志": "Missing dependencies · See logs",
+    "未加载 · 下次通过助手启动": "Not loaded · Use helper to launch",
     "启动入口待修复 · 查看日志": "Launcher needs repair · See logs",
     "游戏启动中 · 等待组件": "Starting · Waiting for plugin",
     "未收到组件心跳 · 查看日志": "No plugin heartbeat · See logs",
@@ -54,7 +62,9 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         "/Applications/Hearthstone/Hearthstone.app/Contents/MacOS/Hearthstone")
     private var observedPID: pid_t?
     private var gameFirstSeen = Date.distantPast
-    private var launcherCandidate: (size: UInt64, modified: Date, firstSeen: Date)?
+    private let gameLauncher = GameLauncher(root: URL(fileURLWithPath: "/Applications/Hearthstone"))
+    private var launchProcess: Process?
+    private var launchItem: NSMenuItem!
     private var statusItem: NSStatusItem!
     private var gameItem: NSMenuItem!
     private var componentItem: NSMenuItem!
@@ -126,6 +136,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         overlayMenuItem = menuItem(text("游戏内浮窗"), action: #selector(toggleOverlay))
         overlayMenuItem.state = UserDefaults.standard.bool(forKey: "overlayDisabled") ? .off : .on
         menu.addItem(overlayMenuItem)
+        launchItem = menuItem(text("通过助手启动炉石"), action: #selector(launchGame))
+        menu.addItem(launchItem)
         menu.addItem(menuItem(text("打开 Battle.net"), action: #selector(openBattleNet)))
         menu.addItem(.separator())
         let languages = NSMenu()
@@ -230,7 +242,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func refreshStatus() {
-        let launcherInstalled = ensureLauncherInstalled()
+        let launcherInstalled = gameLauncher.available
         let gamePID = NSRunningApplication.runningApplications(withBundleIdentifier: gameBundleID)
             .first?.processIdentifier
         if observedPID != gamePID {
@@ -252,6 +264,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         gameItem.title = text(gameItem.title)
         componentItem.title = text(componentItem.title)
+        launchItem.isEnabled = gamePID == nil && launchProcess?.isRunning != true
         actionItem.isEnabled = ready && pendingID == nil
         overlayButton.isEnabled = ready && pendingID == nil
         overlayButton.attributedTitle = NSAttributedString(
@@ -280,60 +293,64 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return RuntimeCore.heartbeatReady(content, pid: gamePID, now: Date().timeIntervalSince1970)
     }
 
-    private func ensureLauncherInstalled() -> Bool {
-        guard let launcher = Bundle.main.url(forResource: "DisconnectLauncher", withExtension: nil),
-              FileManager.default.fileExists(atPath: gameExecutable.path) else { return false }
-        if FileManager.default.contentsEqual(atPath: launcher.path, andPath: gameExecutable.path) {
-            launcherCandidate = nil
-            return true
+    @objc private func launchGame() {
+        guard launchProcess?.isRunning != true,
+              NSRunningApplication.runningApplications(withBundleIdentifier: gameBundleID).isEmpty else {
+            notify("炉石正在运行，请先结束对局并退出游戏。")
+            return
         }
-
-        // Never replace or re-sign game files during a running session.
-        guard NSRunningApplication.runningApplications(withBundleIdentifier: gameBundleID).isEmpty else { return false }
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: gameExecutable.path),
-              let size = (attributes[.size] as? NSNumber)?.uint64Value,
-              let modified = attributes[.modificationDate] as? Date else { return false }
-        let now = Date()
-        if launcherCandidate?.size != size || launcherCandidate?.modified != modified {
-            launcherCandidate = (size, modified, now)
-            return false
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "net.battle.app").isEmpty else {
+            notify("请先打开并登录 Battle.net，再通过助手启动炉石。")
+            return
         }
-        guard let candidate = launcherCandidate,
-              now.timeIntervalSince(candidate.firstSeen) >= 4,
-              isSignedHearthstone(gameExecutable) else { return false }
-
-        let directory = gameExecutable.deletingLastPathComponent()
-        let gameRoot = URL(fileURLWithPath: "/Applications/Hearthstone")
-        let realExecutable = directory.appendingPathComponent("Hearthstone.real")
-        let signedBackup = gameRoot.appendingPathComponent("Hearthstone.original")
-        let id = UUID().uuidString
-        let stagedSigned = gameRoot.appendingPathComponent("Hearthstone.original.\(id).tmp")
-        let stagedReal = gameRoot.appendingPathComponent("Hearthstone.real.\(id).tmp")
-        let stagedLauncher = directory.appendingPathComponent("Hearthstone.\(id).tmp")
-        defer {
-            try? FileManager.default.removeItem(at: stagedSigned)
-            try? FileManager.default.removeItem(at: stagedReal)
-            try? FileManager.default.removeItem(at: stagedLauncher)
-        }
+        guard let launcher = Bundle.main.url(forResource: "DisconnectLauncher", withExtension: nil) else { return }
         do {
-            try FileManager.default.copyItem(at: gameExecutable, to: stagedSigned)
-            try FileManager.default.copyItem(at: gameExecutable, to: stagedReal)
-            guard runCodeSign(["--force", "--sign", "-", stagedReal.path]),
-                  runCodeSign(["--verify", "--strict", stagedReal.path]) else {
-                throw NSError(domain: "HearthstoneDisconnect", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Could not sign game copy"])
+            try gameLauncher.prepare(gameRunning: {
+                !NSRunningApplication.runningApplications(withBundleIdentifier: self.gameBundleID).isEmpty
+            }, trusted: isSignedHearthstone, sign: {
+                self.runCodeSign(["--force", "--sign", "-", $0.path]) &&
+                self.runCodeSign(["--verify", "--strict", $0.path])
+            })
+            let process = Process()
+            process.executableURL = launcher
+            // Battle.net must already be logged in. hs_beta is the China product;
+            // the global product can be selected through the gameUID preference.
+            process.arguments = ["-launch", "-uid", UserDefaults.standard.string(forKey: "gameUID") ?? "hs_beta"]
+            var environment = ProcessInfo.processInfo.environment
+            for key in Array(environment.keys) where key.hasPrefix("DOORSTOP_") || key.hasPrefix("DYLD_") {
+                environment.removeValue(forKey: key)
             }
-            try FileManager.default.copyItem(at: launcher, to: stagedLauncher)
-            guard rename(stagedSigned.path, signedBackup.path) == 0,
-                  rename(stagedReal.path, realExecutable.path) == 0,
-                  rename(stagedLauncher.path, gameExecutable.path) == 0 else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            process.environment = environment
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] process in
+                DispatchQueue.main.async {
+                    self?.recordLaunch("Game process exited with status \(process.terminationStatus)")
+                    self?.refreshStatus()
+                }
             }
-            launcherCandidate = nil
-            return true
+            try process.run()
+            recordLaunch("Launched game PID \(process.processIdentifier); waiting for protocol 2 heartbeat")
+            launchProcess = process
+            notify("已启动炉石，正在等待插件心跳。")
+            refreshStatus()
         } catch {
-            NSLog("Could not restore Hearthstone launcher: %@", error.localizedDescription)
-            return false
+            recordLaunch("Launch failed: " + String(describing: error))
+            NSLog("Assistant launch failed: %@", String(describing: error))
+            notify("启动失败：请检查游戏文件、依赖与签名，查看助手日志。")
+        }
+    }
+
+    private func recordLaunch(_ message: String) {
+        try? FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        let line = ISO8601DateFormatter().string(from: Date()) + " " + message + "\n"
+        let url = supportDirectory.appendingPathComponent("launcher.log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? Data(line.utf8).write(to: url, options: .atomic)
+        } else if let file = try? FileHandle(forWritingTo: url) {
+            defer { try? file.close() }
+            _ = try? file.seekToEnd()
+            try? file.write(contentsOf: Data(line.utf8))
         }
     }
 
@@ -373,9 +390,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard componentReady(for: gamePID) else {
-            notify(ensureLauncherInstalled()
-                ? "拔线组件本次未加载；结束对局后重新启动炉石。"
-                : "拔线组件未加载；启动入口正在修复。")
+            notify("插件未加载；结束对局并退出游戏后，请从助手菜单启动炉石。")
             return
         }
         guard pendingID == nil else {
@@ -463,7 +478,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openBattleNet() {
-        if let url = URL(string: "battlenet://wtcg") { NSWorkspace.shared.open(url) }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Battle.net.app"))
     }
 
     @objc private func changeLanguage(_ sender: NSMenuItem) {
@@ -476,7 +491,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openLogs() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Hearthstone/BepInEx"))
+        try? FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(supportDirectory)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

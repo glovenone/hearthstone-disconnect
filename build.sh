@@ -13,6 +13,6 @@ if [[ -f "Assets/Disconnect.icns" ]]; then
 fi
 cp Info.plist "$app/Contents/Info.plist"
 clang -O2 -Wall -Wextra DisconnectLauncher.c -o "$app/Contents/Resources/DisconnectLauncher"
-swiftc -O RuntimeCore.swift StatusApp.swift -o "$app/Contents/MacOS/Disconnect"
+swiftc -O RuntimeCore.swift GameLauncher.swift StatusApp.swift -o "$app/Contents/MacOS/Disconnect"
 codesign --force --sign - "$app"
 echo "Built: $app and bin/Release/netstandard2.0/DisconnectOnly.dll"

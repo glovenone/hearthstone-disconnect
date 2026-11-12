@@ -9,8 +9,8 @@ import Foundation
         }
         check(!RuntimeCore.heartbeatReady("42 1000 2", pid: 42, now: 1005))
         check(RuntimeCore.status(ready: false, gameRunning: true, starting: true, launcher: true) == "游戏启动中 · 等待组件")
-        check(RuntimeCore.status(ready: false, gameRunning: true, starting: false, launcher: true) == "未收到组件心跳 · 查看日志")
-        check(RuntimeCore.status(ready: false, gameRunning: false, starting: false, launcher: false) == "启动入口待修复 · 查看日志")
+        check(RuntimeCore.status(ready: false, gameRunning: true, starting: false, launcher: true) == "未加载 · 下次通过助手启动")
+        check(RuntimeCore.status(ready: false, gameRunning: false, starting: false, launcher: false) == "依赖不完整 · 查看日志")
         check(RuntimeCore.status(ready: true, gameRunning: true, starting: false, launcher: true) == "已就绪 · 点击拔线")
         check(RuntimeCore.response("old sent", requestID: "new") == nil)
         check(RuntimeCore.response("new sent extra", requestID: "new") == nil)

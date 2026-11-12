@@ -12,9 +12,9 @@ enum RuntimeCore {
 
     static func status(ready: Bool, gameRunning: Bool, starting: Bool, launcher: Bool) -> String {
         if ready { return "已就绪 · 点击拔线" }
-        if !launcher { return "启动入口待修复 · 查看日志" }
+        if !launcher { return "依赖不完整 · 查看日志" }
         if !gameRunning { return "等待炉石启动" }
-        return starting ? "游戏启动中 · 等待组件" : "未收到组件心跳 · 查看日志"
+        return starting ? "游戏启动中 · 等待组件" : "未加载 · 下次通过助手启动"
     }
 
     static func response(_ value: String, requestID: String) -> String? {
