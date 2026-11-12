@@ -17,6 +17,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Battle.net can inherit Doorstop state from a prior game launch.
+       Each new game process must initialize the loader independently. */
+    const char *inherited_state[] = {
+        "DOORSTOP_INITIALIZED", "DOORSTOP_INVOKE_DLL_PATH",
+        "DOORSTOP_PROCESS_PATH", "DOORSTOP_MANAGED_FOLDER_DIR",
+        "DOORSTOP_DLL_SEARCH_DIRS", "DOORSTOP_MONO_LIB_PATH"
+    };
+    for (size_t i = 0; i < sizeof(inherited_state) / sizeof(inherited_state[0]); ++i) {
+        unsetenv(inherited_state[i]);
+    }
+
     setenv("DYLD_INSERT_LIBRARIES", DOORSTOP, 1);
     setenv("DYLD_LIBRARY_PATH", GAME_ROOT, 1);
     setenv("DOORSTOP_ENABLED", "1", 1);

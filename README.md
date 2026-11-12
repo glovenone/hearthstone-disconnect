@@ -67,3 +67,14 @@ C 启动器通过 Doorstop 加载 BepInEx，并执行 `Hearthstone.real`。助�
 - 处理中禁用重复操作；超时后清理本次请求，允许重试。旧的残留请求在十秒后可清理。
 - 右键菜单新增「打开日志」。拖动浮窗顶部可调整位置。
 - 开发预览：`open -a /Applications/拔线.app --args --resident --preview`，无需游戏即可查看浮窗；正常使用省略 `--preview`。
+
+### v1.5.1 启动修复
+
+清理从 Battle.net 继承的 Doorstop 运行时标记，避免重新启动游戏后仍跳过插件初始化。该修复在下次游戏启动生效，不会向当前游戏注入插件。
+
+启动器回归检查（不启动游戏）：
+
+```sh
+clang -Wall -Wextra -Werror Tests/DisconnectLauncherTests.c -o /tmp/disconnect-launcher-tests
+/tmp/disconnect-launcher-tests
+```
