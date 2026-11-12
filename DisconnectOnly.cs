@@ -1,12 +1,13 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using BepInEx;
 using UnityEngine;
 
 namespace DisconnectOnly
 {
-    [BepInPlugin("local.hearthstone.disconnect-only", "Disconnect Only", "1.0.0")]
+    [BepInPlugin("local.hearthstone.disconnect-only", "Disconnect Only", "1.1.0")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private readonly string directory = Path.Combine(
@@ -17,9 +18,14 @@ namespace DisconnectOnly
 
         private void Awake()
         {
-            Directory.CreateDirectory(directory);
-            WriteHeartbeat();
-            Logger.LogInfo("Disconnect Only ready");
+            try {
+                Directory.CreateDirectory(directory);
+                WriteHeartbeat();
+                Logger.LogInfo("Disconnect Only ready (protocol 2)");
+            } catch (Exception ex) {
+                Logger.LogError("Cannot initialize communication directory: " + ex.Message);
+                enabled = false;
+            }
         }
 
         private void Update()
@@ -49,7 +55,19 @@ namespace DisconnectOnly
                 return;
             }
 
-            if (requestId.Length == 0 || requestId.Length > 64) return;
+            // Requests are bound to this process and expire before they can leak
+            // into another game/session after a stall or restart.
+            string[] fields = requestId.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            Guid parsedId;
+            int targetPid;
+            double expires;
+            if (fields.Length != 3 || !Guid.TryParse(fields[0], out parsedId) ||
+                !int.TryParse(fields[1], out targetPid) || targetPid != Process.GetCurrentProcess().Id ||
+                !double.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out expires) ||
+                double.IsNaN(expires) || double.IsInfinity(expires)) return;
+            double nowSeconds = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+            if (expires <= nowSeconds || expires > nowSeconds + 10) return;
+            requestId = fields[0];
 
             string result;
             try
@@ -74,11 +92,24 @@ namespace DisconnectOnly
 
             try
             {
-                File.WriteAllText(Path.Combine(directory, "response"), requestId + " " + result);
+                WriteAtomic("response", requestId + " " + result);
             }
             catch (Exception ex)
             {
                 Logger.LogWarning("Cannot write response: " + ex.Message);
+            }
+        }
+
+        private void WriteAtomic(string name, string value)
+        {
+            string destination = Path.Combine(directory, name);
+            string temporary = destination + ".tmp";
+            try {
+                File.WriteAllText(temporary, value);
+                if (File.Exists(destination)) File.Replace(temporary, destination, null);
+                else File.Move(temporary, destination);
+            } finally {
+                if (File.Exists(temporary)) File.Delete(temporary);
             }
         }
 
@@ -87,8 +118,8 @@ namespace DisconnectOnly
             try
             {
                 string value = Process.GetCurrentProcess().Id + " " +
-                    DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                File.WriteAllText(Path.Combine(directory, "heartbeat"), value);
+                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() + " 2";
+                WriteAtomic("heartbeat", value);
             }
             catch (Exception ex)
             {

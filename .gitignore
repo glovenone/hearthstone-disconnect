@@ -6,3 +6,5 @@ previous/
 DisconnectLauncher
 .DS_Store
 *.log
+Tests/bin/
+Tests/obj/

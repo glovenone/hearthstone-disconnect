@@ -3,6 +3,9 @@ import Darwin
 import Foundation
 
 private let english: [String: String] = [
+    "启动入口待修复 · 查看日志": "Launcher needs repair · See logs",
+    "游戏启动中 · 等待组件": "Starting · Waiting for plugin",
+    "未收到组件心跳 · 查看日志": "No plugin heartbeat · See logs",
     "一键拔线": "Disconnect",
     "处理中…": "Working…",
     "正在发送指令…": "Sending request…",
@@ -49,6 +52,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .appendingPathComponent("Library/Application Support/Hearthstone Disconnect")
     private let gameExecutable = URL(fileURLWithPath:
         "/Applications/Hearthstone/Hearthstone.app/Contents/MacOS/Hearthstone")
+    private var observedPID: pid_t?
+    private var gameFirstSeen = Date.distantPast
     private var launcherCandidate: (size: UInt64, modified: Date, firstSeen: Date)?
     private var statusItem: NSStatusItem!
     private var gameItem: NSMenuItem!
@@ -85,6 +90,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refreshStatus()
         statusTimer = Timer.scheduledTimer(timeInterval: 2, target: self,
             selector: #selector(refreshStatus), userInfo: nil, repeats: true)
+        RunLoop.main.add(statusTimer!, forMode: .common)
 
         if !CommandLine.arguments.contains("--resident") {
             DispatchQueue.main.async { self.disconnect() }
@@ -227,6 +233,12 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let launcherInstalled = ensureLauncherInstalled()
         let gamePID = NSRunningApplication.runningApplications(withBundleIdentifier: gameBundleID)
             .first?.processIdentifier
+        if observedPID != gamePID {
+            observedPID = gamePID
+            gameFirstSeen = Date()
+            if pendingID != nil { finishRequest() }
+        }
+        let starting = gamePID != nil && Date().timeIntervalSince(gameFirstSeen) < 30
         let ready = gamePID.map { componentReady(for: $0) } ?? false
 
         gameItem.title = gamePID == nil ? "炉石：未运行" : "炉石：运行中"
@@ -235,9 +247,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else if gamePID == nil {
             componentItem.title = launcherInstalled ? "拔线：等待炉石启动" : "拔线：启动入口待修复"
         } else {
-            componentItem.title = launcherInstalled
-                ? "拔线：本次未加载，下次启动生效"
-                : "拔线：启动入口待修复"
+            componentItem.title = RuntimeCore.status(ready: false, gameRunning: true,
+                starting: starting, launcher: launcherInstalled)
         }
         gameItem.title = text(gameItem.title)
         componentItem.title = text(componentItem.title)
@@ -248,7 +259,9 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             attributes: [.font: NSFont.systemFont(ofSize: 16, weight: .semibold),
                          .foregroundColor: ready ? NSColor.white : NSColor.lightGray])
         if Date() >= feedbackUntil {
-            overlayStatus.stringValue = text(pendingID != nil ? "正在发送指令…" : ready ? "已就绪 · 点击拔线" : gamePID == nil ? "等待炉石启动" : "组件未加载 · 请重启游戏")
+            overlayStatus.toolTip = nil
+            overlayStatus.stringValue = text(pendingID != nil ? "正在发送指令…" : RuntimeCore.status(
+                ready: ready, gameRunning: gamePID != nil, starting: starting, launcher: launcherInstalled))
         }
         statusItem.button?.contentTintColor = ready ? .systemGreen : .secondaryLabelColor
         overlayButton.contentTintColor = ready ? .systemGreen : .lightGray
@@ -264,12 +277,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func componentReady(for gamePID: pid_t) -> Bool {
         let heartbeat = supportDirectory.appendingPathComponent("heartbeat")
         guard let content = try? String(contentsOf: heartbeat, encoding: .utf8) else { return false }
-        let fields = content.split(whereSeparator: \.isWhitespace)
-        guard fields.count == 2,
-              let heartbeatPID = Int32(fields[0]), heartbeatPID == gamePID,
-              let timestamp = TimeInterval(fields[1]) else { return false }
-        let age = Date().timeIntervalSince1970 - timestamp
-        return age >= -2 && age < 5
+        return RuntimeCore.heartbeatReady(content, pid: gamePID, now: Date().timeIntervalSince1970)
     }
 
     private func ensureLauncherInstalled() -> Bool {
@@ -280,6 +288,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return true
         }
 
+        // Never replace or re-sign game files during a running session.
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: gameBundleID).isEmpty else { return false }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: gameExecutable.path),
               let size = (attributes[.size] as? NSNumber)?.uint64Value,
               let modified = attributes[.modificationDate] as? Date else { return false }
@@ -337,8 +347,8 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
             process.waitUntilExit()
@@ -386,8 +396,11 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let id = UUID().uuidString
         let temporary = supportDirectory.appendingPathComponent("request.\(id)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
         do {
-            try Data((id + "\n").utf8).write(to: temporary, options: .atomic)
+            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+            let expires = Date().addingTimeInterval(4).timeIntervalSince1970
+            try Data(("\(id) \(gamePID) \(expires)\n").utf8).write(to: temporary, options: .atomic)
             try FileManager.default.moveItem(at: temporary, to: request)
         } catch {
             notify("无法发送拔线指令。")
@@ -399,16 +412,16 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         responseDeadline = Date().addingTimeInterval(4)
         responseTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self,
             selector: #selector(checkResponse), userInfo: nil, repeats: true)
+        RunLoop.main.add(responseTimer!, forMode: .common)
     }
 
     @objc private func checkResponse() {
         guard let id = pendingID else { return }
         let response = supportDirectory.appendingPathComponent("response")
         if let value = try? String(contentsOf: response, encoding: .utf8) {
-            let fields = value.split(whereSeparator: \.isWhitespace)
-            if fields.count == 2, fields[0] == id {
+            if let result = RuntimeCore.response(value, requestID: id) {
                 finishRequest()
-                switch fields[1] {
+                switch result {
                 case "sent": notify("已发送模拟断线指令。")
                 case "not-ready": notify("当前没有可断开的对局连接。")
                 default: notify("拔线调用失败，请查看游戏日志。")
@@ -428,7 +441,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let id = pendingID {
             let request = supportDirectory.appendingPathComponent("request")
             if let value = try? String(contentsOf: request, encoding: .utf8),
-               value.trimmingCharacters(in: .whitespacesAndNewlines) == id {
+               value.split(whereSeparator: \.isWhitespace).first == Substring(id) {
                 try? FileManager.default.removeItem(at: request)
             }
         }
@@ -466,10 +479,20 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Hearthstone/BepInEx"))
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        finishRequest()
+        statusTimer?.invalidate()
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
-let app = NSApplication.shared
-let delegate = StatusApp()
-app.delegate = delegate
-app.run()
+@main
+struct DisconnectApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = StatusApp()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

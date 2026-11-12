@@ -7,6 +7,7 @@
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Tests/**/*.cs" />
     <Reference Include="BepInEx">
       <HintPath>/Applications/Hearthstone/BepInEx/core/BepInEx.dll</HintPath>
       <Private>false</Private>

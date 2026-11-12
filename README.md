@@ -78,3 +78,17 @@ C 启动器通过 Doorstop 加载 BepInEx，并执行 `Hearthstone.real`。助�
 clang -Wall -Wextra -Werror Tests/DisconnectLauncherTests.c -o /tmp/disconnect-launcher-tests
 /tmp/disconnect-launcher-tests
 ```
+
+## v1.6.0 稳定性修正与测试
+
+助手与插件必须一起更新。协议 2 的心跳包含版本号，请求包含 UUID、目标游戏 PID 和 4 秒有效期；旧插件不会被新助手误判为兼容。当前游戏已加载的插件不会热更新，下次游戏启动才加载新 DLL。
+
+- 初次观察到游戏后的 30 秒显示等待组件，之后显示未收到心跳，不再一律提示重启。
+- 游戏运行中停止自动修改游戏启动文件。
+- 心跳和响应原子写入，避免读取到半截内容。
+- 请求过期或目标进程不匹配时不调用断线 API；退出助手时清理本次未消费请求。
+- 打开菜单期间仍处理状态与响应计时；签名检查输出不会阻塞在未读取的管道中。
+
+回归测试：`./Tests/run.sh`。C# 测试运行实际插件源码，替换游戏 API 为测试桩；不会启动游戏或触发实际断线。
+
+完整检查记录见 [稳定性检查](docs/stability-review-2026-11-12.md)。
